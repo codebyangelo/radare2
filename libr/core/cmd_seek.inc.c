@@ -631,7 +631,9 @@ static int cmd_seek(void *data, const char *input) {
 		const char *err = NULL;
 		off = r_num_math_err (core->num, u_num, &err);
 		if (err && (*input == ' ' || *input == '+' || *input == '-' || *input == 'b' || (*input >= '0' && *input <= '9'))) {
-			R_LOG_ERROR ("Cannot seek to unknown address '%s' (%s)", u_num, err);
+			if (strchr (u_num, '?') == NULL) {
+				R_LOG_ERROR ("Cannot seek to unknown address '%s' (%s)", u_num, err);
+			}
 			r_core_return_value (core, R_CMD_RC_FAILURE);
 			return 0;
 		}
