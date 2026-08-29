@@ -37,8 +37,6 @@ s
 EOF
 EXPECT=<<EOF
 0x2c
-EOF
-EXPECT_ERR=<<EOF
 ERROR: Cannot seek to unknown address '$FB' (cant find function)
 EOF
 RUN
