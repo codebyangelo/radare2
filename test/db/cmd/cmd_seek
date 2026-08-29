@@ -539,3 +539,18 @@ EXPECT=<<EOF
 0x401012
 EOF
 RUN
+
+NAME=s with invalid expression does not seek to 0
+FILE=malloc://1024
+CMDS=<<EOF
+s 0x100
+s foo
+s
+EOF
+EXPECT_ERR=<<EOF
+ERROR: Cannot seek to unknown address 'foo' (invalid octal number)
+EOF
+EXPECT=<<EOF
+0x100
+EOF
+RUN
