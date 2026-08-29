@@ -143,6 +143,9 @@ EOF
 EXPECT=<<EOF
 0x42
 EOF
+EXPECT_ERR=<<EOF
+ERROR: Cannot seek to unknown address 'noSuchSymbolEndingT' (unknown symbol)
+EOF
 RUN
 
 NAME=seek opcodes
