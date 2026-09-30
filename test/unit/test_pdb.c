@@ -524,11 +524,69 @@ bool test_pdb_type_save(void) {
 	mu_end;
 }
 
+static void mock_get_print_type(STpiStream *ss, void *type, char **name) {
+	*name = strdup ("const uint32_t");
+}
+
+static void mock_enum_get_name(STpiStream *ss, void *type, char **name) {
+	*name = "tagCOINITBASE";
+}
+
+static int mock_enum_get_utype(STpiStream *ss, void *type, void **utype) {
+	*utype = ((STypeInfo *)type)->type_info;
+	return 1;
+}
+
+static void mock_enum_get_members(STpiStream *ss, void *type, RList **members) {
+	*members = NULL;
+}
+
+bool test_pdb_enum_modified_utype(void) {
+	RAnal *anal = r_anal_new ();
+	SLF_MODIFIER mod = { .modified_type = 0x0022, .umodifier = { .modifier = 1 } };
+	SType utype_rec = {
+		.tpi_idx = 0x1000,
+		.type_data = {
+			.leaf_type = eLF_MODIFIER,
+			.type_info = &mod,
+			.get_print_type = mock_get_print_type
+		}
+	};
+	SType enum_rec = {
+		.tpi_idx = 0x1001,
+		.type_data = {
+			.leaf_type = eLF_ENUM,
+			.type_info = &utype_rec,
+			.get_name = mock_enum_get_name,
+			.get_utype = mock_enum_get_utype,
+			.get_members = mock_enum_get_members
+		}
+	};
+	STpiStream tpi = { .types = r_list_new () };
+	r_list_append (tpi.types, &utype_rec);
+	r_list_append (tpi.types, &enum_rec);
+
+	RBinPdb pdb = { .pdb_streams = r_list_new () };
+	r_list_append (pdb.pdb_streams, (void *)1); // stream 0 (PDB_ROOT)
+	r_list_append (pdb.pdb_streams, (void *)1); // stream 1 (PDB)
+	r_list_append (pdb.pdb_streams, &tpi);      // stream 2 (TPI)
+
+	r_parse_pdb_types (anal, &pdb);
+
+	check_kv ("tagCOINITBASE", "enum");
+
+	r_list_free (pdb.pdb_streams);
+	r_list_free (tpi.types);
+	r_anal_free (anal);
+	mu_end;
+}
+
 bool all_tests(void) {
 #if R_SYS_ENDIAN == 0
 	mu_run_test (test_pdb_tpi_cpp);
 	mu_run_test (test_pdb_tpi_rust);
 	mu_run_test (test_pdb_type_save);
+	mu_run_test (test_pdb_enum_modified_utype);
 #endif
 	return tests_passed != tests_run;
 }
