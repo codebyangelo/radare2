@@ -65,29 +65,31 @@ void r_coresym_cache_element_free(RCoreSymCacheElement *element) {
 		return;
 	}
 	size_t i;
-	if (element->segments) {
-		for (i = 0; i < element->hdr->n_segments; i++) {
-			r_coresym_cache_element_segment_fini (&element->segments[i]);
+	if (element->hdr) {
+		if (element->segments) {
+			for (i = 0; i < element->hdr->n_segments; i++) {
+				r_coresym_cache_element_segment_fini (&element->segments[i]);
+			}
 		}
-	}
-	if (element->sections) {
-		for (i = 0; i < element->hdr->n_sections; i++) {
-			r_coresym_cache_element_section_fini (&element->sections[i]);
+		if (element->sections) {
+			for (i = 0; i < element->hdr->n_sections; i++) {
+				r_coresym_cache_element_section_fini (&element->sections[i]);
+			}
 		}
-	}
-	if (element->symbols) {
-		for (i = 0; i < element->hdr->n_symbols; i++) {
-			r_coresym_cache_element_symbol_fini (&element->symbols[i]);
+		if (element->symbols) {
+			for (i = 0; i < element->hdr->n_symbols; i++) {
+				r_coresym_cache_element_symbol_fini (&element->symbols[i]);
+			}
 		}
-	}
-	if (element->lined_symbols) {
-		for (i = 0; i < element->hdr->n_lined_symbols; i++) {
-			r_coresym_cache_element_lined_symbol_fini (&element->lined_symbols[i]);
+		if (element->lined_symbols) {
+			for (i = 0; i < element->hdr->n_lined_symbols; i++) {
+				r_coresym_cache_element_lined_symbol_fini (&element->lined_symbols[i]);
+			}
 		}
-	}
-	if (element->line_info) {
-		for (i = 0; i < element->hdr->n_line_info; i++) {
-			r_coresym_cache_element_line_info_fini (&element->line_info[i]);
+		if (element->line_info) {
+			for (i = 0; i < element->hdr->n_line_info; i++) {
+				r_coresym_cache_element_line_info_fini (&element->line_info[i]);
+			}
 		}
 	}
 	free (element->segments);
@@ -103,12 +105,15 @@ void r_coresym_cache_element_free(RCoreSymCacheElement *element) {
 
 ut64 r_coresym_cache_element_pa2va(RCoreSymCacheElement *element, ut64 pa) {
 	size_t i;
+	if (!element || !element->hdr || !element->segments) {
+		return pa;
+	}
 	for (i = 0; i < element->hdr->n_segments; i++) {
 		RCoreSymCacheElementSegment *seg = &element->segments[i];
 		if (seg->size == 0) {
 			continue;
 		}
-		if (seg->paddr < pa && pa < seg->paddr + seg->size) {
+		if (seg->paddr <= pa && pa < seg->paddr + seg->size) {
 			return pa - seg->paddr + seg->vaddr;
 		}
 	}
@@ -139,12 +144,15 @@ static char *str_dup_safe(const ut8 *b, const ut8 *str, const ut8 *end) {
 }
 
 static char *str_dup_safe_fixed(const ut8 *b, const ut8 *str, ut64 len, const ut8 *end) {
-	if (str >= b && str + len < end) {
-		char *result = calloc (1, len + 1);
-		if (result) {
-			r_str_ncpy (result, (const char *)str, len);
-			return result;
-		}
+	if (str >= b && str + len <= end) {
+		return r_str_ndup ((const char *)str, len);
+	}
+	return NULL;
+}
+
+static char *str_dup_safe_offset(const ut8 *b, const ut8 *origin, ut64 offset, const ut8 *end) {
+	if (origin >= b && origin < end && offset < (ut64)(end - origin)) {
+		return str_dup_safe (b, origin + offset, end);
 	}
 	return NULL;
 }
@@ -165,6 +173,10 @@ RCoreSymCacheElement *r_coresym_cache_element_new(RBinFile *bf, RBuffer *buf, ut
 		goto beach;
 	}
 	result = R_NEW0 (RCoreSymCacheElement);
+	if (!result) {
+		free (hdr);
+		return NULL;
+	}
 	result->hdr = hdr;
 	b = malloc (hdr->size);
 	if (!b) {
@@ -179,10 +191,10 @@ RCoreSymCacheElement *r_coresym_cache_element_new(RBinFile *bf, RBuffer *buf, ut
 	if (file_name) {
 		result->file_name = file_name;
 	} else if (hdr->file_name_off) {
-		result->file_name = str_dup_safe (b, b + (size_t)hdr->file_name_off, end);
+		result->file_name = str_dup_safe_offset (b, b, hdr->file_name_off, end);
 	}
 	if (hdr->version_off) {
-		result->binary_version = str_dup_safe (b, b + (size_t)hdr->version_off, end);
+		result->binary_version = str_dup_safe_offset (b, b, hdr->version_off, end);
 	}
 	const size_t word_size = bits / 8;
 	ut64 start_of_sections = (ut64)hdr->n_segments * R_CS_EL_SIZE_SEG + R_CS_EL_OFF_SEGS;
@@ -195,6 +207,15 @@ RCoreSymCacheElement *r_coresym_cache_element_new(RBinFile *bf, RBuffer *buf, ut
 	const ut64 start_of_line_info = start_of_lined_symbols + (ut64)hdr->n_lined_symbols * R_CS_EL_SIZE_LSYM;
 	const ut64 start_of_unknown_pairs = start_of_line_info + (ut64)hdr->n_line_info * R_CS_EL_SIZE_LINFO;
 	const ut64 start_of_strings = start_of_unknown_pairs + (ut64)hdr->n_symbols * 8;
+
+	if (start_of_sections > hdr->size ||
+	    start_of_symbols > hdr->size ||
+	    start_of_lined_symbols > hdr->size ||
+	    start_of_line_info > hdr->size ||
+	    start_of_unknown_pairs > hdr->size ||
+	    start_of_strings > hdr->size) {
+		goto beach;
+	}
 
 	ut64 page_zero_size = 0;
 	size_t page_zero_idx = 0;
@@ -220,18 +241,12 @@ RCoreSymCacheElement *r_coresym_cache_element_new(RBinFile *bf, RBuffer *buf, ut
 		if (hdr->p) {
 			cursor += 8;
 		}
-		for (i = 0; i < hdr->n_segments && cursor + sizeof (RCoreSymCacheElementSegment) < end; i++) {
+		for (i = 0; i < hdr->n_segments && cursor + R_CS_EL_SIZE_SEG <= end; i++) {
 			RCoreSymCacheElementSegment *seg = &result->segments[i];
 			seg->paddr = seg->vaddr = r_read_le64 (cursor);
 			cursor += 8;
-			if (cursor + 8 > end) {
-				break;
-			}
 			seg->size = seg->vsize = r_read_le64 (cursor);
 			cursor += 8;
-			if (cursor + 16 > end) {
-				break;
-			}
 			seg->name = str_dup_safe_fixed (b, cursor, 16, end);
 			cursor += 16;
 			if (!seg->name) {
@@ -264,25 +279,16 @@ RCoreSymCacheElement *r_coresym_cache_element_new(RBinFile *bf, RBuffer *buf, ut
 		}
 		size_t i;
 		ut8 *cursor = b + start_of_sections;
-		for (i = 0; i < hdr->n_sections && cursor < end; i++) {
+		for (i = 0; i < hdr->n_sections && cursor + sect_size <= end; i++) {
 			ut8 *sect_start = cursor;
 			RCoreSymCacheElementSection *sect = &result->sections[i];
-			if (cursor + (word_size * 4) > end) {
-				goto beach;
-			}
 			sect->vaddr = sect->paddr = r_read_ble (cursor, false, bits);
 			if (sect->vaddr < page_zero_size) {
 				sect->vaddr += page_zero_size;
 			}
 			cursor += word_size;
-			if (cursor + word_size >= end) {
-				break;
-			}
 			sect->size = r_read_ble (cursor, false, bits);
 			cursor += word_size;
-			if (cursor + word_size >= end) {
-				break;
-			}
 			ut64 sect_name_off = r_read_ble (cursor, false, bits);
 			if (!i && !sect_name_off) {
 				relative_tostrings = true;
@@ -292,9 +298,8 @@ RCoreSymCacheElement *r_coresym_cache_element_new(RBinFile *bf, RBuffer *buf, ut
 				cursor += word_size;
 			}
 			string_origin = relative_tostrings? b + start_of_strings : sect_start;
-			if (sect_name_off < (ut64)(size_t)(end - string_origin)) {
-				sect->name = str_dup_safe (b, string_origin + sect_name_off, end);
-			} else {
+			sect->name = str_dup_safe_offset (b, string_origin, sect_name_off, end);
+			if (!sect->name) {
 				sect->name = strdup ("");
 			}
 		}
@@ -315,13 +320,12 @@ RCoreSymCacheElement *r_coresym_cache_element_new(RBinFile *bf, RBuffer *buf, ut
 			size_t mangled_name_off = r_read_le32 (cursor + 0x10);
 			sym->unk2 = (st32)r_read_le32 (cursor + 0x14);
 			string_origin = relative_tostrings? b + start_of_strings : cursor;
-			sym->name = str_dup_safe (b, string_origin + name_off, end);
+			sym->name = str_dup_safe_offset (b, string_origin, name_off, end);
 			if (!sym->name) {
 				cursor += R_CS_EL_SIZE_SYM;
 				continue;
 			}
-			string_origin = relative_tostrings? b + start_of_strings : cursor;
-			sym->mangled_name = str_dup_safe (b, string_origin + mangled_name_off, end);
+			sym->mangled_name = str_dup_safe_offset (b, string_origin, mangled_name_off, end);
 			if (!sym->mangled_name) {
 				cursor += R_CS_EL_SIZE_SYM;
 				continue;
@@ -348,19 +352,17 @@ RCoreSymCacheElement *r_coresym_cache_element_new(RBinFile *bf, RBuffer *buf, ut
 			lsym->flc.line = r_read_le32 (cursor + 0x1c);
 			lsym->flc.col = r_read_le32 (cursor + 0x20);
 			string_origin = relative_tostrings? b + start_of_strings : cursor;
-			lsym->sym.name = str_dup_safe (b, string_origin + name_off, end);
+			lsym->sym.name = str_dup_safe_offset (b, string_origin, name_off, end);
 			if (!lsym->sym.name) {
 				cursor += R_CS_EL_SIZE_LSYM;
 				continue;
 			}
-			string_origin = relative_tostrings? b + start_of_strings : cursor;
-			lsym->sym.mangled_name = str_dup_safe (b, string_origin + mangled_name_off, end);
+			lsym->sym.mangled_name = str_dup_safe_offset (b, string_origin, mangled_name_off, end);
 			if (!lsym->sym.mangled_name) {
 				cursor += R_CS_EL_SIZE_LSYM;
 				continue;
 			}
-			string_origin = relative_tostrings? b + start_of_strings : cursor;
-			lsym->flc.file = str_dup_safe (b, string_origin + file_name_off, end);
+			lsym->flc.file = str_dup_safe_offset (b, string_origin, file_name_off, end);
 			if (!lsym->flc.file) {
 				cursor += R_CS_EL_SIZE_LSYM;
 				continue;
@@ -384,7 +386,7 @@ RCoreSymCacheElement *r_coresym_cache_element_new(RBinFile *bf, RBuffer *buf, ut
 			info->flc.line = r_read_le32 (cursor + 0xc);
 			info->flc.col = r_read_le32 (cursor + 0x10);
 			string_origin = relative_tostrings? b + start_of_strings : cursor;
-			info->flc.file = str_dup_safe (b, string_origin + file_name_off, end);
+			info->flc.file = str_dup_safe_offset (b, string_origin, file_name_off, end);
 			if (!info->flc.file) {
 				break;
 			}
@@ -403,8 +405,19 @@ RCoreSymCacheElement *r_coresym_cache_element_new(RBinFile *bf, RBuffer *buf, ut
 	 * Those are the last info before the strings at the end.
 	 */
 
-beach:
 	free (b);
 	return result;
+
+beach:
+	free (b);
+	if (result) {
+		if (result->file_name == file_name) {
+			result->file_name = NULL;
+		}
+		r_coresym_cache_element_free (result);
+	} else {
+		free (hdr);
+	}
+	return NULL;
 }
 
