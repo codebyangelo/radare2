@@ -4,6 +4,7 @@
 #include <r_bin.h>
 #include <r_muta.h>
 #include "../../libr/bin/format/mach0/coresymbolication.h"
+#include "../../libr/bin/format/mach0/dyldcache.h"
 
 //TODO test r_str_chop_path
 
@@ -1270,6 +1271,108 @@ bool test_r_bin_mach0_coresym_bounds(void) {
 	mu_end;
 }
 
+bool test_r_bin_dyldcache_bounds(void) {
+	int nlib = 0;
+	mu_assert_null (r_bin_dyldcache_extract (NULL, 0, &nlib), "null dyldcache extract");
+	mu_assert_null (r_bin_dyldcache_free (NULL), "null dyldcache free");
+
+	ut8 c[0x300] = {0};
+	memcpy (c, "dyld_v1   i386", 14);
+	r_write_le32 (c + 16, 0x58); // baseaddroff
+	r_write_le32 (c + 24, 0x80); // startaddr
+	r_write_le32 (c + 28, 1);    // numlibs
+	r_write_le64 (c + 0x58, 0x10000000); // dyld_vmbase
+	r_str_ncpy ((char *)(c + 0x60), "/usr/lib/libtest.dylib", 64);
+	r_write_le64 (c + 0x80, 0x10000100); // address (liboff = 0x100)
+	r_write_le32 (c + 0x80 + 24, 0x60);  // pathFileOffset
+
+	// Mach-O at 0x100 (magic=MH_MAGIC, ncmds=2, sizeofcmds=148)
+	r_write_le32 (c + 0x100, 0xfeedface);
+	r_write_le32 (c + 0x110, 2);
+	r_write_le32 (c + 0x114, 148);
+
+	// LC 0: LC_SEGMENT (__LINKEDIT, fileoff=0x200, filesize=0x40, nsects=1)
+	r_write_le32 (c + 0x11c, 1); // LC_SEGMENT
+	r_write_le32 (c + 0x120, 124);
+	memcpy (c + 0x124, "__LINKEDIT", 10);
+	r_write_le32 (c + 0x11c + 32, 0x200); // fileoff
+	r_write_le32 (c + 0x11c + 36, 0x40);  // filesize
+	r_write_le32 (c + 0x11c + 48, 1);     // nsects = 1
+	// Section 0 (offset=0x210 at c + 0x11c + 56 + 40)
+	r_write_le32 (c + 0x11c + 56 + 40, 0x210);
+
+	// LC 1: LC_SYMTAB (symoff=0x220, stroff=0x230)
+	r_write_le32 (c + 0x198, 2); // LC_SYMTAB
+	r_write_le32 (c + 0x19c, 24);
+	r_write_le32 (c + 0x1a0, 0x220);
+	r_write_le32 (c + 0x1a8, 0x230);
+
+	struct r_bin_dyldcache_obj_t *obj = r_bin_dyldcache_from_bytes_new (c, sizeof (c));
+	mu_assert_notnull (obj, "dyldcache obj creation");
+	struct r_bin_dyldcache_lib_t *lib = r_bin_dyldcache_extract (obj, 0, &nlib);
+	mu_assert_notnull (lib, "extracted lib creation");
+	mu_assert_streq (lib->path, "/usr/lib/libtest.dylib", "extracted lib path");
+
+	// In extracted lib->b, Mach-O starts at 0. Headers size = 28 + 124 + 24 = 176
+	mu_assert_eq (r_buf_read_le32_at (lib->b, 0x3c), 176, "seg fileoff points to start of segment data");
+	mu_assert_eq (r_buf_read_le32_at (lib->b, 0x7c), 192, "section offset correctly patched in place");
+	mu_assert_eq (r_buf_read_le32_at (lib->b, 0xa0), 208, "symtab symoff rebased into LC_SYMTAB");
+	mu_assert_eq (r_buf_read_le32_at (lib->b, 0xa8), 224, "symtab stroff rebased into LC_SYMTAB");
+
+	r_unref (lib->b);
+	free (lib);
+	r_bin_dyldcache_free (obj);
+
+	// 2. Verify underflow prevention when table/section offsets precede base
+	// Invert offsets: seg.fileoff = 0x200 (linkedit_offset = 0x150), but symoff = 0x50 < 0x150, sect.offset = 0x80 < 0x150
+	r_write_le32 (c + 0x11c + 56 + 40, 0x80);
+	r_write_le32 (c + 0x1a0, 0x50);
+	struct r_bin_dyldcache_obj_t *obj_underflow = r_bin_dyldcache_from_bytes_new (c, sizeof (c));
+	mu_assert_notnull (obj_underflow, "dyldcache underflow test obj creation");
+	struct r_bin_dyldcache_lib_t *lib_underflow = r_bin_dyldcache_extract (obj_underflow, 0, &nlib);
+	mu_assert_notnull (lib_underflow, "extracted lib underflow test creation");
+	// Values must remain un-patched rather than wrapping around to 0xffffff..
+	mu_assert_eq (r_buf_read_le32_at (lib_underflow->b, 0x7c), 0x80, "section offset not underflowed");
+	mu_assert_eq (r_buf_read_le32_at (lib_underflow->b, 0xa0), 0x50, "symtab symoff not underflowed");
+	r_unref (lib_underflow->b);
+	free (lib_underflow);
+	r_bin_dyldcache_free (obj_underflow);
+
+	// 3. Reject 32-bit seg.fileoff + seg.filesize addition wraparound (0x100 + 0xffffff80 -> 0x80)
+	r_write_le32 (c + 0x11c + 32, 0x100);
+	r_write_le32 (c + 0x11c + 36, 0xffffff80);
+	struct r_bin_dyldcache_obj_t *obj_wrap = r_bin_dyldcache_from_bytes_new (c, sizeof (c));
+	mu_assert_notnull (obj_wrap, "dyldcache wraparound test obj creation");
+	mu_assert_null (r_bin_dyldcache_extract (obj_wrap, 0, &nlib), "wrapped segment filesize rejected");
+	r_bin_dyldcache_free (obj_wrap);
+
+	// 4. Handle zero-sized segment at EOF cleanly without failing empty slice append
+	r_write_le32 (c + 0x11c + 32, sizeof (c));
+	r_write_le32 (c + 0x11c + 36, 0);
+	struct r_bin_dyldcache_obj_t *obj_zero = r_bin_dyldcache_from_bytes_new (c, sizeof (c));
+	mu_assert_notnull (obj_zero, "dyldcache zero-size segment obj creation");
+	struct r_bin_dyldcache_lib_t *lib_zero = r_bin_dyldcache_extract (obj_zero, 0, &nlib);
+	mu_assert_notnull (lib_zero, "zero-sized segment at EOF accepted");
+	r_unref (lib_zero->b);
+	free (lib_zero);
+	r_bin_dyldcache_free (obj_zero);
+
+	// 5. Reject image_infos extending past EOF and address < dyld_vmbase underflow
+	r_write_le64 (c + 0x80, 0x1000); // address < dyld_vmbase (0x10000000)
+	struct r_bin_dyldcache_obj_t *obj_addr = r_bin_dyldcache_from_bytes_new (c, sizeof (c));
+	mu_assert_notnull (obj_addr, "dyldcache address underflow obj creation");
+	mu_assert_null (r_bin_dyldcache_extract (obj_addr, 0, &nlib), "address < dyld_vmbase rejected");
+	r_bin_dyldcache_free (obj_addr);
+
+	r_write_le32 (c + 24, sizeof (c) - 4); // startaddr near EOF
+	struct r_bin_dyldcache_obj_t *obj_oob = r_bin_dyldcache_from_bytes_new (c, sizeof (c));
+	mu_assert_notnull (obj_oob, "dyldcache OOB image_infos obj creation");
+	mu_assert_null (r_bin_dyldcache_extract (obj_oob, 0, &nlib), "truncated image_infos table rejected");
+	r_bin_dyldcache_free (obj_oob);
+
+	mu_end;
+}
+
 bool all_tests(void) {
 	mu_run_test (test_r_bin_symbol_physical_fallback);
 	mu_run_test (test_r_bin_debugger_buffer_layout);
@@ -1297,7 +1400,8 @@ bool all_tests(void) {
 	mu_run_test (test_r_bin_pe_characteristics_offset);
 	mu_run_test (test_r_bin_pe_lfanew_checks);
 	mu_run_test(test_r_bin_mach0_full_segname);
-	mu_run_test(test_r_bin_mach0_coresym_bounds);
+	mu_run_test (test_r_bin_mach0_coresym_bounds);
+	mu_run_test (test_r_bin_dyldcache_bounds);
 	return tests_passed != tests_run;
 }
 
